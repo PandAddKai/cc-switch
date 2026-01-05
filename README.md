@@ -27,6 +27,9 @@ cc "hello"
 ./install.sh
 ```
 
+This installs files into `~/.local/share/cc-switch` and symlinks into `~/.local/bin`,
+so you can move the repo directory later without breaking `cc-*` commands.
+
 ## Make `cc-use` affect current shell
 
 By default, `cc-use` only switches the stored “current profile”. To make it also
