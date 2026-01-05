@@ -1,0 +1,5 @@
+dist/
+.cc-switch-test/
+.tmpbin/
+*.swp
+*.swo

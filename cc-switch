@@ -1,0 +1,518 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROG="cc-switch"
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+cc-switch - manage Claude Code relay profiles (ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY)
+
+Usage:
+  cc-switch init
+  cc-switch list
+  cc-switch current
+  cc-switch add <profile>
+  cc-switch edit <profile> [--prompt|--editor]
+  cc-switch del <profile> [-y]
+  cc-switch use <profile>
+  cc-switch env
+  cc-switch shell-init
+  cc-switch run [--] [claude args...]
+  cc-switch path
+
+Environment:
+  CC_SWITCH_HOME         Config directory (default: ~/.cc-switch)
+  CC_SWITCH_CLAUDE_BIN   Claude executable (default: claude from PATH)
+
+Notes:
+  - SSOT: profile data stored only under CC_SWITCH_HOME/profiles/<profile>/{base_url,api_key}
+  - Atomic: profile add/edit/use are atomic (write temp + rename).
+  - `cc-switch env` prints secrets to stdout; prefer `cc-switch run` (or `cc`) to avoid leaking keys.
+EOF
+}
+
+script_dir() {
+  cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd
+}
+
+cc_home() {
+  local home="${CC_SWITCH_HOME:-$HOME/.cc-switch}"
+  echo "$home"
+}
+
+profiles_dir() {
+  echo "$(cc_home)/profiles"
+}
+
+trash_dir() {
+  echo "$(cc_home)/trash"
+}
+
+current_file() {
+  echo "$(cc_home)/current"
+}
+
+ensure_init() {
+  umask 077
+  mkdir -p "$(profiles_dir)" "$(trash_dir)"
+}
+
+validate_profile_name() {
+  local name="$1"
+  [[ -n "$name" ]] || die "profile name required"
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid profile name (allowed: A-Za-z0-9._-): $name"
+}
+
+profile_dir() {
+  echo "$(profiles_dir)/$1"
+}
+
+profile_base_url_file() {
+  echo "$(profile_dir "$1")/base_url"
+}
+
+profile_api_key_file() {
+  echo "$(profile_dir "$1")/api_key"
+}
+
+profile_exists() {
+  [[ -d "$(profile_dir "$1")" ]]
+}
+
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  echo "$value"
+}
+
+validate_base_url() {
+  local url
+  url="$(trim "$1")"
+  [[ -n "$url" ]] || die "base_url cannot be empty"
+  [[ "$url" =~ ^https?:// ]] || die "base_url must start with http:// or https:// (got: $url)"
+}
+
+validate_api_key() {
+  local key
+  key="$(trim "$1")"
+  [[ -n "$key" ]] || die "api_key cannot be empty"
+}
+
+atomic_write_file() {
+  local path="$1"
+  local content="$2"
+  local mode="${3:-600}"
+
+  local dir tmp
+  dir="$(dirname "$path")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.tmp.${PROG}.XXXXXX")"
+  umask 077
+  printf "%s" "$content" >"$tmp"
+  chmod "$mode" "$tmp"
+  mv -f "$tmp" "$path"
+}
+
+atomic_replace_dir() {
+  local new_dir="$1"
+  local target_dir="$2"
+
+  local parent base ts backup
+  parent="$(dirname "$target_dir")"
+  base="$(basename "$target_dir")"
+  ts="$(date +%Y%m%d-%H%M%S)"
+  backup="$parent/.bak.${base}.${ts}.$$"
+
+  if [[ -d "$target_dir" ]]; then
+    mv -f "$target_dir" "$backup"
+  fi
+
+  if mv -f "$new_dir" "$target_dir"; then
+    rm -rf -- "$backup" 2>/dev/null || true
+    return 0
+  fi
+
+  rm -rf -- "$new_dir" 2>/dev/null || true
+  if [[ -d "$backup" ]]; then
+    mv -f "$backup" "$target_dir" || true
+  fi
+  die "failed to replace profile directory: $target_dir"
+}
+
+read_current_profile() {
+  local file_path
+  file_path="$(current_file)"
+  [[ -f "$file_path" ]] || return 0
+  head -n 1 "$file_path" | tr -d '\r\n'
+}
+
+read_profile_base_url() {
+  local file_path
+  file_path="$(profile_base_url_file "$1")"
+  [[ -f "$file_path" ]] || die "missing base_url for profile: $1"
+  head -n 1 "$file_path" | tr -d '\r\n'
+}
+
+read_profile_api_key() {
+  local file_path
+  file_path="$(profile_api_key_file "$1")"
+  [[ -f "$file_path" ]] || die "missing api_key for profile: $1"
+  head -n 1 "$file_path" | tr -d '\r\n'
+}
+
+redact_key() {
+  local key="$1"
+  if [[ ${#key} -le 8 ]]; then
+    echo "***"
+  else
+    echo "${key:0:6}..."
+  fi
+}
+
+shell_quote() {
+  local value="$1"
+  printf "'%s'" "$(printf "%s" "$value" | sed "s/'/'\\\\''/g")"
+}
+
+cmd_init() {
+  ensure_init
+  echo "OK: initialized $(cc_home)"
+}
+
+cmd_path() {
+  ensure_init
+  echo "CC_SWITCH_HOME=$(cc_home)"
+  echo "profiles_dir=$(profiles_dir)"
+  echo "current_file=$(current_file)"
+}
+
+cmd_list() {
+  ensure_init
+  local cur
+  cur="$(read_current_profile || true)"
+
+  local dir
+  dir="$(profiles_dir)"
+  if [[ ! -d "$dir" ]]; then
+    return 0
+  fi
+
+  local -a names
+  mapfile -t names < <(find "$dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
+  for n in "${names[@]}"; do
+    if [[ "$n" == "$cur" && -n "$cur" ]]; then
+      printf "* %s\n" "$n"
+    else
+      printf "  %s\n" "$n"
+    fi
+  done
+}
+
+cmd_current() {
+  ensure_init
+  local cur
+  cur="$(read_current_profile || true)"
+  [[ -n "$cur" ]] || die "no current profile selected; run: $PROG use <profile>"
+  profile_exists "$cur" || die "current profile not found on disk: $cur"
+
+  local base_url api_key
+  base_url="$(read_profile_base_url "$cur")"
+  api_key="$(read_profile_api_key "$cur")"
+
+  echo "profile=$cur"
+  echo "ANTHROPIC_BASE_URL=$base_url"
+  echo "ANTHROPIC_API_KEY=$(redact_key "$api_key")"
+}
+
+cmd_use() {
+  ensure_init
+  local name="${1:-}"
+  validate_profile_name "$name"
+  profile_exists "$name" || die "profile not found: $name"
+
+  atomic_write_file "$(current_file)" "${name}"$'\n' 600
+  echo "OK: current=$name"
+}
+
+cmd_add() {
+  ensure_init
+  local name="${1:-}"
+  validate_profile_name "$name"
+  profile_exists "$name" && die "profile already exists: $name"
+
+  local base_url api_key
+  printf "base_url (e.g. https://api.anthropic.com): " >&2
+  IFS= read -r base_url
+  validate_base_url "$base_url"
+
+  printf "api_key: " >&2
+  IFS= read -r -s api_key
+  printf "\n" >&2
+  validate_api_key "$api_key"
+
+  local parent tmp target
+  parent="$(profiles_dir)"
+  tmp="$(mktemp -d "$parent/.tmp.${name}.XXXXXX")"
+  target="$(profile_dir "$name")"
+
+  umask 077
+  printf "%s\n" "$(trim "$base_url")" >"$tmp/base_url"
+  printf "%s\n" "$(trim "$api_key")" >"$tmp/api_key"
+  chmod 600 "$tmp/base_url" "$tmp/api_key"
+
+  mv -f "$tmp" "$target"
+  echo "OK: added profile=$name"
+}
+
+cmd_edit() {
+  ensure_init
+  local name="${1:-}"
+  local mode="${2:-}"
+  validate_profile_name "$name"
+  profile_exists "$name" || die "profile not found: $name"
+
+  if [[ "$mode" == "--prompt" ]]; then
+    local current_base_url current_api_key
+    current_base_url="$(read_profile_base_url "$name")"
+    current_api_key="$(read_profile_api_key "$name")"
+
+    echo "Editing profile=$name" >&2
+    echo "Current base_url: $current_base_url" >&2
+    echo "Current api_key:  $(redact_key "$current_api_key")" >&2
+    echo "" >&2
+
+    local base_url api_key
+    printf "base_url [%s]: " "$current_base_url" >&2
+    IFS= read -r base_url
+    if [[ -z "$(trim "$base_url")" ]]; then
+      base_url="$current_base_url"
+    fi
+    validate_base_url "$base_url"
+
+    printf "api_key [keep]: " >&2
+    IFS= read -r -s api_key
+    printf "\n" >&2
+    if [[ -z "$(trim "$api_key")" ]]; then
+      api_key="$current_api_key"
+    fi
+    validate_api_key "$api_key"
+
+    local parent tmp target
+    parent="$(profiles_dir)"
+    tmp="$(mktemp -d "$parent/.edit.${name}.XXXXXX")"
+    target="$(profile_dir "$name")"
+
+    umask 077
+    printf "%s\n" "$(trim "$base_url")" >"$tmp/base_url"
+    printf "%s\n" "$(trim "$api_key")" >"$tmp/api_key"
+    chmod 600 "$tmp/base_url" "$tmp/api_key"
+
+    atomic_replace_dir "$tmp" "$target"
+    echo "OK: edited profile=$name"
+    return 0
+  fi
+
+  if [[ -n "$mode" && "$mode" != "--editor" ]]; then
+    die "unknown edit mode: $mode (use --prompt or --editor)"
+  fi
+
+  local parent tmp target
+  parent="$(profiles_dir)"
+  tmp="$(mktemp -d "$parent/.edit.${name}.XXXXXX")"
+  target="$(profile_dir "$name")"
+
+  cp -f -- "$(profile_base_url_file "$name")" "$tmp/base_url"
+  cp -f -- "$(profile_api_key_file "$name")" "$tmp/api_key"
+  chmod 600 "$tmp/base_url" "$tmp/api_key"
+
+  local editor
+  editor="${EDITOR:-vi}"
+  "$editor" "$tmp/base_url" "$tmp/api_key"
+
+  local base_url api_key
+  base_url="$(head -n 1 "$tmp/base_url" | tr -d '\r\n')"
+  api_key="$(head -n 1 "$tmp/api_key" | tr -d '\r\n')"
+  validate_base_url "$base_url"
+  validate_api_key "$api_key"
+  chmod 600 "$tmp/base_url" "$tmp/api_key"
+
+  atomic_replace_dir "$tmp" "$target"
+  echo "OK: edited profile=$name"
+}
+
+cmd_del() {
+  ensure_init
+  local name="${1:-}"
+  local force="${2:-}"
+  validate_profile_name "$name"
+  profile_exists "$name" || die "profile not found: $name"
+
+  if [[ "$force" != "-y" && "$force" != "--yes" ]]; then
+    printf "Delete profile '%s'? [y/N]: " "$name" >&2
+    local ans
+    IFS= read -r ans
+    ans="$(echo "$ans" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    [[ "$ans" == "y" || "$ans" == "yes" ]] || die "aborted"
+  fi
+
+  local cur
+  cur="$(read_current_profile || true)"
+  if [[ "$cur" == "$name" ]]; then
+    rm -f -- "$(current_file)" || true
+  fi
+
+  local ts trash_name src dst
+  ts="$(date +%Y%m%d-%H%M%S)"
+  trash_name="${ts}-${name}-$$"
+  src="$(profile_dir "$name")"
+  dst="$(trash_dir)/$trash_name"
+  mv -f "$src" "$dst"
+  rm -rf -- "$dst"
+
+  echo "OK: deleted profile=$name"
+}
+
+cmd_env() {
+  ensure_init
+  local cur
+  cur="$(read_current_profile || true)"
+  [[ -n "$cur" ]] || die "no current profile selected; run: $PROG use <profile>"
+  profile_exists "$cur" || die "current profile not found on disk: $cur"
+
+  local base_url api_key
+  base_url="$(read_profile_base_url "$cur")"
+  api_key="$(read_profile_api_key "$cur")"
+
+  printf "export ANTHROPIC_BASE_URL=%s\n" "$(shell_quote "$base_url")"
+  printf "export ANTHROPIC_API_KEY=%s\n" "$(shell_quote "$api_key")"
+}
+
+cmd_shell_init() {
+  cat <<'EOF'
+# cc-switch shell integration (bash/zsh)
+# Usage (bash):  eval "$(cc-switch shell-init)"
+# Put the eval line in ~/.bashrc for persistence.
+
+cc-use() {
+  local profile="${1:-}"
+  if [[ -z "$profile" || "$profile" == "-h" || "$profile" == "--help" ]]; then
+    echo "Usage: cc-use <profile>" >&2
+    return 2
+  fi
+
+  command cc-switch use "$profile" || return $?
+  eval "$(command cc-switch env)" || return $?
+  command cc-switch current
+}
+
+cc-env() {
+  command cc-switch env
+}
+
+cc-current() {
+  command cc-switch current
+}
+
+cc-list() {
+  command cc-switch list
+}
+
+cc() {
+  command cc-switch run -- "$@"
+}
+EOF
+}
+
+resolve_claude_bin() {
+  if [[ -n "${CC_SWITCH_CLAUDE_BIN:-}" ]]; then
+    echo "$CC_SWITCH_CLAUDE_BIN"
+    return 0
+  fi
+  command -v claude >/dev/null 2>&1 || die "cannot find 'claude' in PATH (set CC_SWITCH_CLAUDE_BIN)"
+  echo "claude"
+}
+
+cmd_run() {
+  ensure_init
+  local cur
+  cur="$(read_current_profile || true)"
+  [[ -n "$cur" ]] || die "no current profile selected; run: $PROG use <profile>"
+  profile_exists "$cur" || die "current profile not found on disk: $cur"
+
+  local base_url api_key
+  base_url="$(read_profile_base_url "$cur")"
+  api_key="$(read_profile_api_key "$cur")"
+
+  local claude
+  claude="$(resolve_claude_bin)"
+
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  fi
+
+  ANTHROPIC_BASE_URL="$base_url" ANTHROPIC_API_KEY="$api_key" exec "$claude" "$@"
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    ""|-h|--help|help)
+      usage
+      ;;
+    init)
+      shift
+      cmd_init "$@"
+      ;;
+    path)
+      shift
+      cmd_path "$@"
+      ;;
+    list)
+      shift
+      cmd_list "$@"
+      ;;
+    current)
+      shift
+      cmd_current "$@"
+      ;;
+    add)
+      shift
+      cmd_add "$@"
+      ;;
+    edit)
+      shift
+      cmd_edit "$@"
+      ;;
+    del|delete|rm)
+      shift
+      cmd_del "$@"
+      ;;
+    use|switch)
+      shift
+      cmd_use "$@"
+      ;;
+    env)
+      shift
+      cmd_env "$@"
+      ;;
+    shell-init)
+      shift
+      cmd_shell_init "$@"
+      ;;
+    run)
+      shift
+      cmd_run "$@"
+      ;;
+    *)
+      die "unknown command: $cmd (run: $PROG --help)"
+      ;;
+  esac
+}
+
+main "$@"
