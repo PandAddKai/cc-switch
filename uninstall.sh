@@ -12,6 +12,7 @@ rm -f \
   "$PREFIX/cc-del" \
   "$PREFIX/cc-list" \
   "$PREFIX/cc-current" \
+  "$PREFIX/cc-status" \
   "$PREFIX/cc" \
   "$PREFIX/cc-env"
 

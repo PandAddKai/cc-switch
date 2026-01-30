@@ -13,9 +13,12 @@ usage() {
 cc-switch - manage Claude Code relay profiles (ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY)
 
 Usage:
+  cc-switch [claude args...]   # shorthand for: cc-switch run -- [claude args...]
   cc-switch init
   cc-switch list
   cc-switch current
+  cc-switch status [--full]
+  cc-switch migrate
   cc-switch add <profile>
   cc-switch edit <profile> [--prompt|--editor]
   cc-switch del <profile> [-y]
@@ -32,7 +35,7 @@ Environment:
 Notes:
   - SSOT: profile data stored only under CC_SWITCH_HOME/profiles/<profile>/{base_url,api_key}
   - Atomic: profile add/edit/use are atomic (write temp + rename).
-  - `cc-switch env` prints secrets to stdout; prefer `cc-switch run` (or `cc`) to avoid leaking keys.
+  - `cc-switch env` prints secrets to stdout; prefer `cc-switch run` (or `cc-switch ...`) to avoid leaking keys.
 EOF
 }
 
@@ -290,6 +293,62 @@ cmd_current() {
   echo "ANTHROPIC_API_KEY=$(redact_key "$api_key")"
 }
 
+cmd_status() {
+  ensure_init
+  local full="${1:-}"
+  if [[ "$full" == "-h" || "$full" == "--help" ]]; then
+    cat <<'EOF'
+Usage:
+  cc-switch status [--full]
+
+Options:
+  --full   Print the full API key (unsafe; prints secret to stdout)
+EOF
+    return 0
+  fi
+
+  local show_full=0
+  if [[ "$full" == "--full" ]]; then
+    show_full=1
+  elif [[ -n "$full" ]]; then
+    die "unknown option for status: $full (use: cc-switch status --help)"
+  fi
+
+  local cur
+  cur="$(read_current_profile || true)"
+  [[ -n "$cur" ]] || die "no current profile selected; run: $PROG use <profile>"
+  profile_exists "$cur" || die "current profile not found on disk: $cur"
+
+  local base_url api_key
+  base_url="$(read_profile_base_url "$cur")"
+  api_key="$(read_profile_api_key "$cur")"
+
+  echo "CC_SWITCH_HOME=$(cc_home)"
+  echo "profile=$cur"
+  echo "ANTHROPIC_BASE_URL=$base_url"
+  if [[ "$show_full" == "1" ]]; then
+    echo "ANTHROPIC_API_KEY=$api_key"
+  else
+    echo "ANTHROPIC_API_KEY=$(redact_key "$api_key")"
+  fi
+}
+
+cmd_migrate() {
+  ensure_init
+
+  # Migration is intentionally minimal: profile data stays under CC_SWITCH_HOME.
+  # We only remove the legacy `cc` alias under the default user prefix if it
+  # points to this tool's installed wrapper.
+  local legacy_cc="$HOME/.local/bin/cc"
+  if [[ -L "$legacy_cc" && "$(readlink "$legacy_cc")" == "$(script_dir)/cc" ]]; then
+    rm -f -- "$legacy_cc"
+    echo "OK: removed legacy alias: $legacy_cc"
+    return 0
+  fi
+
+  echo "OK: nothing to migrate"
+}
+
 cmd_use() {
   ensure_init
   local name="${1:-}"
@@ -335,6 +394,13 @@ cmd_edit() {
   profile_exists "$name" || die "profile not found: $name"
 
   if [[ "$mode" == "--prompt" ]]; then
+    local new_name
+    new_name="$(read_line "name" "$name")"
+    validate_profile_name "$new_name"
+    if [[ "$new_name" != "$name" ]]; then
+      profile_exists "$new_name" && die "profile already exists: $new_name"
+    fi
+
     local current_base_url current_api_key
     current_base_url="$(read_profile_base_url "$name")"
     current_api_key="$(read_profile_api_key "$name")"
@@ -357,7 +423,7 @@ cmd_edit() {
     local parent tmp target
     parent="$(profiles_dir)"
     tmp="$(mktemp -d "$parent/.edit.${name}.XXXXXX")"
-    target="$(profile_dir "$name")"
+    target="$(profile_dir "$new_name")"
 
     umask 077
     printf "%s\n" "$(trim "$base_url")" >"$tmp/base_url"
@@ -365,7 +431,26 @@ cmd_edit() {
     chmod 600 "$tmp/base_url" "$tmp/api_key"
 
     atomic_replace_dir "$tmp" "$target"
-    echo "OK: edited profile=$name"
+    if [[ "$new_name" == "$name" ]]; then
+      echo "OK: edited profile=$name"
+      return 0
+    fi
+
+    local cur
+    cur="$(read_current_profile || true)"
+    if [[ "$cur" == "$name" ]]; then
+      atomic_write_file "$(current_file)" "${new_name}"$'\n' 600
+    fi
+
+    local ts trash_name src dst
+    ts="$(date +%Y%m%d-%H%M%S)"
+    trash_name="${ts}-${name}-$$"
+    src="$(profile_dir "$name")"
+    dst="$(trash_dir)/$trash_name"
+    mv -f "$src" "$dst" || die "failed to remove old profile directory: $src"
+    rm -rf -- "$dst" 2>/dev/null || true
+
+    echo "OK: edited+renamed profile=$name -> $new_name"
     return 0
   fi
 
@@ -440,6 +525,10 @@ cmd_env() {
   base_url="$(read_profile_base_url "$cur")"
   api_key="$(read_profile_api_key "$cur")"
 
+  # Avoid auth conflicts when users previously logged in with a token.
+  # This tool is profile-based (API key + base URL), so ensure the token
+  # doesn't remain set in the shell.
+  echo "unset ANTHROPIC_AUTH_TOKEN"
   printf "export ANTHROPIC_BASE_URL=%s\n" "$(shell_quote "$base_url")"
   printf "export ANTHROPIC_API_KEY=%s\n" "$(shell_quote "$api_key")"
 }
@@ -450,6 +539,11 @@ cmd_shell_init() {
 # Usage (bash):  eval "$(cc-switch shell-init)"
 # Put the eval line in ~/.bashrc for persistence.
 
+__CC_SWITCH_BIN="$(command -v cc-switch 2>/dev/null || true)"
+if [[ -z "$__CC_SWITCH_BIN" && -x "$HOME/.local/bin/cc-switch" ]]; then
+  __CC_SWITCH_BIN="$HOME/.local/bin/cc-switch"
+fi
+
 cc-use() {
   local profile="${1:-}"
   if [[ -z "$profile" || "$profile" == "-h" || "$profile" == "--help" ]]; then
@@ -457,25 +551,29 @@ cc-use() {
     return 2
   fi
 
-  command cc-switch use "$profile" || return $?
-  eval "$(command cc-switch env)" || return $?
-  command cc-switch current
+  "$__CC_SWITCH_BIN" use "$profile" || return $?
+  eval "$("$__CC_SWITCH_BIN" env)" || return $?
+  "$__CC_SWITCH_BIN" current
 }
 
 cc-env() {
-  command cc-switch env
+  "$__CC_SWITCH_BIN" env
 }
 
 cc-current() {
-  command cc-switch current
+  "$__CC_SWITCH_BIN" current
 }
 
 cc-list() {
-  command cc-switch list
+  "$__CC_SWITCH_BIN" list
+}
+
+cc-status() {
+  "$__CC_SWITCH_BIN" status "$@"
 }
 
 cc() {
-  command cc-switch run -- "$@"
+  "$__CC_SWITCH_BIN" run -- "$@"
 }
 EOF
 }
@@ -507,7 +605,8 @@ cmd_run() {
     shift
   fi
 
-  ANTHROPIC_BASE_URL="$base_url" ANTHROPIC_API_KEY="$api_key" exec "$claude" "$@"
+  # Ensure token-based auth doesn't conflict with API key auth.
+  exec env -u ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL="$base_url" ANTHROPIC_API_KEY="$api_key" "$claude" "$@"
 }
 
 main() {
@@ -531,6 +630,14 @@ main() {
     current)
       shift
       cmd_current "$@"
+      ;;
+    status)
+      shift
+      cmd_status "$@"
+      ;;
+    migrate)
+      shift
+      cmd_migrate "$@"
       ;;
     add)
       shift
@@ -561,7 +668,9 @@ main() {
       cmd_run "$@"
       ;;
     *)
-      die "unknown command: $cmd (run: $PROG --help)"
+      # If the first arg isn't a known management subcommand, treat it as
+      # a Claude invocation (equivalent to: `cc-switch run -- ...`).
+      cmd_run -- "$@"
       ;;
   esac
 }

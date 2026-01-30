@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage:
+  cc-status [--full]
+
+Shortcut for:
+  cc-switch status [--full]
+EOF
+  exit 0
+fi
+
+script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=cc-lib.sh
+source "$script_dir/cc-lib.sh"
+
+cc_switch="$(cc_switch_resolve_bin)"
+exec "$cc_switch" status "$@"
+

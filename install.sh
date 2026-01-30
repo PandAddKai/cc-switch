@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local/bin}"
 INSTALL_ROOT="${INSTALL_ROOT:-$HOME/.local/share/cc-switch}"
+INSTALL_CC_ALIAS="${INSTALL_CC_ALIAS:-0}"
 
 mkdir -p "$PREFIX"
 mkdir -p "$INSTALL_ROOT"
@@ -30,7 +31,6 @@ install_doc README.md
 install_doc VERSION
 
 install_file cc-switch
-install_file cc
 install_file cc-env
 install_file cc-use
 install_file cc-add
@@ -38,11 +38,11 @@ install_file cc-edit
 install_file cc-del
 install_file cc-list
 install_file cc-current
+install_file cc-status
 install_file cc-lib.sh
 install_file uninstall.sh
 
 link_bin cc-switch
-link_bin cc
 link_bin cc-env
 link_bin cc-use
 link_bin cc-add
@@ -50,11 +50,25 @@ link_bin cc-edit
 link_bin cc-del
 link_bin cc-list
 link_bin cc-current
+link_bin cc-status
+
+if [[ "$INSTALL_CC_ALIAS" == "1" ]]; then
+  install_file cc
+  link_bin cc
+else
+  # Remove legacy `cc` alias from older installs to avoid shadowing system `cc`.
+  if [[ -L "$PREFIX/cc" && "$(readlink "$PREFIX/cc")" == "$INSTALL_ROOT/cc" ]]; then
+    rm -f -- "$PREFIX/cc"
+  fi
+  # Also remove the legacy wrapper file from older installs (it is only used by the `cc` alias).
+  rm -f -- "$INSTALL_ROOT/cc" 2>/dev/null || true
+fi
 
 cat <<EOF
 OK: installed to $INSTALL_ROOT
 OK: installed symlinks into $PREFIX
-- cc-switch cc cc-env cc-use cc-add cc-edit cc-del cc-list cc-current
+- cc-switch cc-env cc-use cc-add cc-edit cc-del cc-list cc-current cc-status
+Note: install cc alias with: INSTALL_CC_ALIAS=1 ./install.sh
 
 Make sure $PREFIX is in PATH.
 EOF

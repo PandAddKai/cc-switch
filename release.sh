@@ -19,6 +19,7 @@ tar -czf "$OUT" \
   cc-del \
   cc-list \
   cc-current \
+  cc-status \
   cc-lib.sh \
   install.sh \
   uninstall.sh \

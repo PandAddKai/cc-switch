@@ -18,7 +18,7 @@ Profiles are stored in `~/.cc-switch` (override with `CC_SWITCH_HOME`).
 cc-switch init
 cc-add myrelay
 cc-use myrelay
-cc "hello"
+cc-switch "hello"
 ```
 
 ## Install
@@ -50,14 +50,31 @@ echo 'eval "$(cc-switch shell-init)"' >> ~/.bashrc
 ```bash
 cc-list
 cc-current
+cc-status [--full]  # show current profile; --full prints API key (unsafe)
 
 cc-add <profile>    # interactive create
-cc-edit <profile>   # interactive edit (in-terminal)
+cc-edit <profile>   # interactive edit (in-terminal; can rename in prompt)
 cc-del  <profile>   # delete (asks to confirm; add -y to skip)
 cc-use  <profile>   # switch current profile
 
-cc <claude args...> # run Claude with current profile (recommended)
-cc-env              # print exports (leaks key to stdout)
+cc-switch [args...] # run Claude with current profile (recommended)
+cc-switch env       # print exports (leaks key to stdout)
+```
+
+## Optional: install `cc` alias
+
+If you want the `cc` convenience command (note: it may shadow system `cc` on some machines):
+
+```bash
+INSTALL_CC_ALIAS=1 ./install.sh
+```
+
+## Migration: remove legacy `cc`
+
+If you previously installed a version that created `~/.local/bin/cc`, reinstalling will remove that symlink by default. You can also run:
+
+```bash
+cc-switch migrate
 ```
 
 ## Release
