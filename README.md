@@ -42,7 +42,25 @@ eval "$(cc-switch shell-init)"
 Persist it (bash):
 
 ```bash
-echo 'eval "$(cc-switch shell-init)"' >> ~/.bashrc
+cat <<'EOF' >> ~/.bashrc
+
+# --- cc-switch shell integration ---
+# Use an absolute path so this works even before ~/.local/bin is on PATH.
+if [[ $- == *i* ]]; then
+  if [[ -x "$HOME/.local/bin/cc-switch" ]]; then
+    eval "$("$HOME/.local/bin/cc-switch" shell-init)"
+  elif command -v cc-switch >/dev/null 2>&1; then
+    eval "$(cc-switch shell-init)"
+  fi
+
+  # Optional: avoid defining a `cc` function (keeps system C compiler `cc`).
+  unset -f cc 2>/dev/null || true
+fi
+EOF
+
+# apply to current terminal
+hash -r
+source ~/.bashrc
 ```
 
 ## Commands
