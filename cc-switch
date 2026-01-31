@@ -267,7 +267,16 @@ cmd_list() {
   fi
 
   local -a names
-  mapfile -t names < <(find "$dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
+  # List only direct child directories. Using `cd` avoids surprises when `profiles_dir`
+  # itself is a symlink (common in profile-sync setups).
+  mapfile -t names < <(
+    cd "$dir" 2>/dev/null || exit 0
+    shopt -s nullglob
+    for d in */; do
+      [[ -d "$d" ]] || continue
+      printf "%s\n" "${d%/}"
+    done | sort
+  )
   for n in "${names[@]}"; do
     if [[ "$n" == "$cur" && -n "$cur" ]]; then
       printf "* %s\n" "$n"
