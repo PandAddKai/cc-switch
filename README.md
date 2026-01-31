@@ -79,14 +79,6 @@ cc-switch [args...] # run Claude with current profile (recommended)
 cc-switch env       # print exports (leaks key to stdout)
 ```
 
-## Optional: install `cc` alias
-
-If you want the `cc` convenience command (note: it may shadow system `cc` on some machines):
-
-```bash
-INSTALL_CC_ALIAS=1 ./install.sh
-```
-
 ## Migration: remove legacy `cc`
 
 If you previously installed a version that created `~/.local/bin/cc`, reinstalling will remove that symlink by default. You can also run:

@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local/bin}"
 INSTALL_ROOT="${INSTALL_ROOT:-$HOME/.local/share/cc-switch}"
-INSTALL_CC_ALIAS="${INSTALL_CC_ALIAS:-0}"
 
 mkdir -p "$PREFIX"
 mkdir -p "$INSTALL_ROOT"
@@ -52,23 +51,24 @@ link_bin cc-list
 link_bin cc-current
 link_bin cc-status
 
-if [[ "$INSTALL_CC_ALIAS" == "1" ]]; then
-  install_file cc
-  link_bin cc
-else
   # Remove legacy `cc` alias from older installs to avoid shadowing system `cc`.
   if [[ -L "$PREFIX/cc" && "$(readlink "$PREFIX/cc")" == "$INSTALL_ROOT/cc" ]]; then
     rm -f -- "$PREFIX/cc"
   fi
-  # Also remove the legacy wrapper file from older installs (it is only used by the `cc` alias).
+  # Remove legacy wrapper file from older installs.
   rm -f -- "$INSTALL_ROOT/cc" 2>/dev/null || true
-fi
+
+  # Remove legacy `claude` wrapper from older installs.
+  if [[ -L "$PREFIX/claude" && "$(readlink "$PREFIX/claude")" == "$INSTALL_ROOT/claude" ]]; then
+    rm -f -- "$PREFIX/claude"
+  fi
+  rm -f -- "$INSTALL_ROOT/claude" 2>/dev/null || true
 
 cat <<EOF
 OK: installed to $INSTALL_ROOT
 OK: installed symlinks into $PREFIX
 - cc-switch cc-env cc-use cc-add cc-edit cc-del cc-list cc-current cc-status
-Note: install cc alias with: INSTALL_CC_ALIAS=1 ./install.sh
+Note: this installer never replaces the system \`claude\` or \`cc\` commands.
 
 Make sure $PREFIX is in PATH.
 EOF
